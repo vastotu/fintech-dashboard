@@ -33,7 +33,33 @@ import {
   YAxis,
 } from "recharts";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
+/**
+ * Base URL of the FastAPI backend.
+ *
+ * Both names are accepted: NEXT_PUBLIC_API_URL takes precedence, with
+ * NEXT_PUBLIC_API_BASE kept as an alias so existing local `.env.local` files
+ * keep working. A mismatch between the name set in the hosting dashboard and
+ * the name read here is indistinguishable from "unset" - it silently falls
+ * back to localhost, and the deployed browser then calls the visitor's own
+ * machine.
+ *
+ * `||` rather than `??` on purpose: an env var defined but empty should fall
+ * through too, otherwise the base becomes "" and every fetch turns into a
+ * same-origin relative path that 404s against the frontend host.
+ *
+ * Trailing slashes are stripped because the paths below all start with one,
+ * and "https://api.example.com//api/asset/AAPL" is a different route to
+ * Starlette than the single-slash form - it 404s.
+ *
+ * Note for deploys: NEXT_PUBLIC_* values are inlined into the browser bundle
+ * at build time, so changing this in Vercel requires a redeploy, not a
+ * restart.
+ */
+const API_BASE = (
+  process.env.NEXT_PUBLIC_API_URL ||
+  process.env.NEXT_PUBLIC_API_BASE ||
+  "http://localhost:8000"
+).replace(/\/+$/, "");
 
 const INITIAL_TICKER = "AAPL";
 const SEARCH_DEBOUNCE_MS = 220;
@@ -898,7 +924,9 @@ export default function DashboardPage() {
         setAsset({
           key,
           data: null,
-          error: `Cannot reach the API at ${API_BASE}. Is the FastAPI server running on port 8000?`,
+          // Names the URL actually used, which is the fastest way to spot a
+          // misconfigured NEXT_PUBLIC_API_URL in a deployed build.
+          error: `Cannot reach the API at ${API_BASE}. Check that the backend is running and that it allows requests from this origin.`,
         });
       }
     })();

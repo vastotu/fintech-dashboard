@@ -1,5 +1,6 @@
 """FastAPI entry point for the Real-time Market Sentiment & Trading Dashboard."""
 
+import logging
 import os
 
 from dotenv import load_dotenv
@@ -13,22 +14,35 @@ from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 
 from routers.market import router as market_router  # noqa: E402
 
-DEFAULT_FRONTEND_URL = "http://localhost:3000"
+logger = logging.getLogger(__name__)
+
+# Wildcard origin. Verified against Starlette 1.8: with allow_credentials=True
+# this does NOT emit a literal "Access-Control-Allow-Origin: *" (which every
+# browser rejects on a credentialed request). Starlette echoes the requesting
+# origin instead, so the combination is legal. The trade is that it echoes
+# *any* origin, so the API is callable from anywhere - acceptable while it
+# serves only public market data and holds no user session, but it should be
+# narrowed to the real domain via FRONTEND_URL once that domain is stable.
+ALLOW_ANY_ORIGIN = "*"
 
 
 def _allowed_origins() -> list[str]:
-    """CORS allow-list from FRONTEND_URL, defaulting to local dev.
+    """CORS allow-list from FRONTEND_URL, falling back to "any origin".
 
     Accepts a comma-separated list so one deployment can serve a production
-    domain and Vercel preview URLs. A single value behaves as a single origin.
+    domain alongside Vercel preview URLs. A single value behaves as a single
+    origin. Trailing slashes are trimmed because browsers send an Origin
+    header without one, and "https://x.vercel.app/" would never match.
 
-    Note: `allow_credentials=True` below means "*" is not a usable value here.
-    Browsers reject a wildcard origin on credentialed requests, so each origin
-    must be named explicitly.
+    An unset or empty FRONTEND_URL yields ["*"]. That is deliberate for the
+    MVP: a CORS misconfiguration fails in the browser console with no
+    server-side trace, which is a miserable thing to debug on a fresh deploy.
+    Naming the origin explicitly is still the right end state; see the
+    ALLOW_ANY_ORIGIN note above.
     """
-    raw = os.getenv("FRONTEND_URL", DEFAULT_FRONTEND_URL)
+    raw = os.getenv("FRONTEND_URL", "")
     origins = [origin.strip().rstrip("/") for origin in raw.split(",")]
-    return [origin for origin in origins if origin] or [DEFAULT_FRONTEND_URL]
+    return [origin for origin in origins if origin] or [ALLOW_ANY_ORIGIN]
 
 
 app = FastAPI(
@@ -37,9 +51,23 @@ app = FastAPI(
     version="0.1.0",
 )
 
+_origins = _allowed_origins()
+
+# Logged at startup so a deployed instance says which mode it is in. A CORS
+# rejection is otherwise invisible server-side - it only shows up in the
+# browser console - so this is the one line that makes it diagnosable from
+# the Render logs.
+if _origins == [ALLOW_ANY_ORIGIN]:
+    logger.warning(
+        "FRONTEND_URL is unset: allowing requests from any origin. "
+        "Set FRONTEND_URL to your deployed frontend domain to restrict this."
+    )
+else:
+    logger.info("CORS allow-list: %s", ", ".join(_origins))
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_allowed_origins(),
+    allow_origins=_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
