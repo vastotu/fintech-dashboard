@@ -5,4 +5,7 @@ python-dotenv
 pydantic
 yfinance
 requests
+# Pulled in by yfinance, pinned because services/market_data.py imports it
+# directly: Yahoo's search endpoint rejects plain requests' TLS fingerprint.
+curl_cffi==0.16.3
 google-genai

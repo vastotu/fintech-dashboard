@@ -1,1 +1,23 @@
 @import "tailwindcss";
+
+/* Recharts renders SVG with prop-driven colors, not class names, so the chart
+   palette lives in CSS variables instead. That keeps one source of truth for
+   light/dark and avoids shipping a JS theme detector just to color an axis.
+   Values track Tailwind's slate/emerald/red scales. */
+:root {
+  --chart-grid: #e2e8f0; /* slate-200 */
+  --chart-axis: #64748b; /* slate-500 */
+  --chart-surface: #ffffff;
+  --chart-surface-border: #e2e8f0; /* slate-200 */
+  --chart-cursor: #94a3b8; /* slate-400 */
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --chart-grid: #1e293b; /* slate-800 */
+    --chart-axis: #94a3b8; /* slate-400 */
+    --chart-surface: #0f172a; /* slate-900 */
+    --chart-surface-border: #334155; /* slate-700 */
+    --chart-cursor: #475569; /* slate-600 */
+  }
+}
