@@ -288,6 +288,59 @@ def search_tickers(query: str, count: int = DEFAULT_QUOTES_COUNT) -> list[Ticker
     return matches
 
 
+# Yahoo serves fundamentals from `quoteSummary` and charts from `chart`, and
+# blocks them independently - datacenter IPs commonly lose quoteSummary (so
+# `info` comes back {}) while `chart` keeps working. The chart response
+# carries its own metadata block, which overlaps enough with `info` to rebuild
+# most of the KPI header. These are its key names mapped onto the `info`
+# spelling, so one lookup can serve both sources.
+#
+# `previousClose` is listed before `chartPreviousClose` deliberately: when the
+# metadata carries both, the direct field is the better value.
+META_TO_INFO_KEYS: dict[str, str] = {
+    "shortName": "shortName",
+    "longName": "longName",
+    "exchangeName": "exchange",
+    "fullExchangeName": "fullExchangeName",
+    "currency": "currency",
+    "exchangeTimezoneName": "exchangeTimezoneName",
+    "regularMarketPrice": "regularMarketPrice",
+    "previousClose": "previousClose",
+    # Deliberately NOT mapping `chartPreviousClose` here - see the guarded use
+    # in fetch_asset_profile. It is the close *before the chart window*, which
+    # is a month stale on a 1M range and would misreport the daily move.
+    "regularMarketDayLow": "regularMarketDayLow",
+    "regularMarketDayHigh": "regularMarketDayHigh",
+    "fiftyTwoWeekLow": "fiftyTwoWeekLow",
+    "fiftyTwoWeekHigh": "fiftyTwoWeekHigh",
+    "regularMarketVolume": "regularMarketVolume",
+}
+
+
+def _quote_fields(
+    info: dict[str, Any] | None, meta: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Merge chart metadata under `info`, keyed the way `info` is keyed.
+
+    `info` wins wherever it has a value: quoteSummary is richer and
+    authoritative when it's reachable. The metadata only fills gaps, which is
+    the whole point - on a host where quoteSummary is blocked, `info` is {}
+    and every field below comes from the chart call we already made.
+    """
+    merged: dict[str, Any] = {}
+
+    for meta_key, info_key in META_TO_INFO_KEYS.items():
+        value = (meta or {}).get(meta_key)
+        if value is not None and merged.get(info_key) is None:
+            merged[info_key] = value
+
+    for key, value in (info or {}).items():
+        if value is not None:
+            merged[key] = value
+
+    return merged
+
+
 def _column(frame: Any, name: str) -> list[Any]:
     """Column values, or all-None when yfinance omits the column entirely.
 
@@ -441,7 +494,34 @@ def fetch_asset_profile(
 
     history = [] if frame is None or frame.empty else _build_history(frame)
 
-    profile = _build_profile(symbol, info, history)
+    # Populated by the history call above, so this costs no extra request.
+    try:
+        meta: dict[str, Any] = handle.history_metadata or {}
+    except Exception as exc:  # noqa: BLE001 - yfinance raises loosely typed errors
+        logger.warning("No chart metadata for %s: %s", symbol, exc)
+        meta = {}
+
+    if not info and meta:
+        logger.warning(
+            "quoteSummary returned nothing for %s; rebuilding the profile from "
+            "chart metadata. Valuation fields (market cap, P/E, EPS, dividend, "
+            "average volume) are only served by quoteSummary and stay null.",
+            symbol,
+        )
+
+    quote = _quote_fields(info, meta)
+
+    # `chartPreviousClose` is the close immediately before the chart window
+    # opens. On an intraday range that window is today, so it is exactly the
+    # prior session close - but on a 1M range it is a month old. Used only
+    # where it means what we need; every other range falls through to
+    # `_build_profile`, which reads the second-to-last daily bar instead.
+    if quote.get("previousClose") is None and range_key in INTRADAY_PERIODS:
+        prior_session = _safe_float(meta.get("chartPreviousClose"))
+        if prior_session is not None:
+            quote["previousClose"] = prior_session
+
+    profile = _build_profile(symbol, quote, history, yf_interval)
     if profile is None:
         logger.info("No market data returned for %s.", symbol)
         return _error(f"No market data found for {symbol!r}.", range_key)
@@ -493,14 +573,18 @@ def fetch_quote_profile(ticker: str) -> AssetProfileResult:
 
 
 def _build_profile(
-    symbol: str, info: dict[str, Any], history: list[HistoryPoint]
+    symbol: str,
+    info: dict[str, Any],
+    history: list[HistoryPoint],
+    interval: str = "1d",
 ) -> dict[str, Any] | None:
     """Assemble the profile block, or None when there's nothing usable.
 
     Shared by `fetch_asset_profile` and `fetch_quote_profile` so the KPI set
     can't drift between the chart endpoint and the sentiment engine. `history`
     is optional context: when present it backfills fields the quote endpoint
-    sometimes omits.
+    sometimes omits. `interval` says what one bar represents, which decides
+    whether the series can stand in for a prior session close.
     """
     current_price = _safe_float(info.get("regularMarketPrice"))
     prev_close = _safe_float(info.get("previousClose")) or _safe_float(
@@ -511,7 +595,13 @@ def _build_profile(
     # upstream failure still renders.
     if current_price is None and history:
         current_price = history[-1]["close"]
-    if prev_close is None and len(history) > 1:
+
+    # Only daily bars make history[-2] the previous session. On 1wk/1mo bars
+    # it is last week or last month, and on intraday bars it is five minutes
+    # ago - either way it would turn "today's move" into a number that looks
+    # precise and isn't. Left null instead, so the UI shows N/A rather than a
+    # confident 2.98% when the real move is 0.50%.
+    if prev_close is None and interval == "1d" and len(history) > 1:
         prev_close = history[-2]["close"]
 
     if current_price is None and not history:
